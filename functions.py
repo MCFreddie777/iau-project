@@ -14,6 +14,13 @@ from statistics import mode
 from sklearn.preprocessing import Imputer
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+from sklearn.tree import DecisionTreeClassifier
+from sklearn import tree
+from sklearn import metrics
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import classification_report
+from sklearn.base import TransformerMixin
 
 
 def load(path):
@@ -114,13 +121,15 @@ def fill_null_age_by_date(age, date, store):
 def fill_null_age_by_mean(data, store):
 	unique_sexes = data.sex.unique()
 
-	if 'mean' not in store:
-		store['mean'] = {}
+	if 'mean_age' not in store:
+		store['mean_age'] = {}
 		for sex in unique_sexes:
 			mean = data.loc[(data.age.notnull()) & (data.sex == sex)].age.mean()
-			store['mean'][sex] = mean
+			store['mean_age'][sex] = mean
 	for sex in unique_sexes:
-		data.loc[(data.sex == sex) & (data.age.isna()), 'age'] = store['mean'][sex]
+		data.loc[(data.sex == sex) & (data.age.isna()), 'age'] = store['mean_age'][sex]
+
+	return data
 
 
 def sanitize_age(data, store):
@@ -134,8 +143,6 @@ def sanitize_age(data, store):
 	)
 
 	data.loc[(data.age < 0), 'age'] = np.nan
-
-	fill_null_age_by_mean(data, store)
 
 	return data
 
@@ -490,3 +497,125 @@ def resolve_outliers(data, store):
 		data = use_quantiles(data, col)
 
 	return data
+
+
+def fill_columns_with_mean(data, store, columns):
+	class MyImputer_num(TransformerMixin):
+
+		def __init__(self, missing_value=np.nan):
+			self.missing_value = missing_value
+			self.mean = 0
+
+		def _get_mask(self, X, value_to_mask):
+			if np.isnan(value_to_mask):
+				return np.isnan(X);
+			else:
+				return np.equal(X, value_to_mask)
+
+		def fit(self, X, y=None):
+			mask = self._get_mask(X, self.missing_value)
+			self.mean = np.mean(X[~mask])
+			return self
+
+		def transform(self, X):
+			mask = self._get_mask(X, self.missing_value)
+			X[mask] = self.mean
+
+			return X
+
+	if 'my_mean_imp' not in store:
+		store['my_mean_imp'] = dict()
+		for col in columns:
+			store['my_mean_imp'][col] = MyImputer_num()
+			store['my_mean_imp'][col].fit(data[col])
+
+	for col in columns:
+		data.loc[:, col] = store['my_mean_imp'][col].transform(data.loc[:, col])
+
+	return data
+
+
+def fill_columns_with_freq(data, store, columns):
+	class MyImputer_cat(TransformerMixin):
+		def __init__(self):
+			"""
+			Impute missing values.
+			"""
+
+		def fit(self, X, y=None):
+			self.fill = X.value_counts().index[0]
+
+			return self
+
+		def transform(self, X, y=None):
+			return X.fillna(self.fill)
+
+	if 'my_freq_imp' not in store:
+		store['my_freq_imp'] = dict()
+		for col in columns:
+			store['my_freq_imp'][col] = MyImputer_cat()
+			store['my_freq_imp'][col].fit(data[col])
+
+	for col in columns:
+		data[col] = store['my_freq_imp'][col].transform(data[col])
+
+	return data
+
+
+def create_stromcek(strat_store, strategy):
+	data_train = strat_store["train"].dropna()
+	train_labels = data_train['class']
+
+	data_valid = strat_store["valid"].dropna()
+	valid_labels = data_valid['class']
+
+	columns = ['name', 'address', 'date_of_birth', 'class']
+
+	df_train_class = data_train.drop(columns, axis=1)
+	df_train_class = pd.get_dummies(df_train_class)
+
+	df_valid_class = data_valid.drop(columns, axis=1)
+	df_valid_class = pd.get_dummies(df_valid_class)
+
+	missing_cols = set(df_train_class.columns) - set(df_valid_class.columns)
+
+	for c in missing_cols:
+		df_valid_class[c] = 0
+
+	df_valid_class = df_valid_class[df_train_class.columns]
+
+	clf = tree.DecisionTreeClassifier()
+
+	parameters = {'criterion': ('gini', 'entropy'), 'splitter': ('best', 'random'), 'max_depth': range(2, 20),
+				  'max_features': range(1, 77, 5)}
+	optimization = GridSearchCV(clf, parameters, cv=10)
+
+	vysledok = optimization.fit(df_train_class, train_labels)
+	vysledok
+
+	params = optimization.best_params_
+
+	clf = tree.DecisionTreeClassifier(
+		criterion=params['criterion'],
+		max_depth=params['max_depth'],
+		max_features=params['max_features'],
+		splitter=params['splitter'])
+
+	clf = clf.fit(df_train_class, train_labels)
+
+	predicted_labels = clf.predict(df_valid_class)
+	basic_acc = metrics.accuracy_score(valid_labels, predicted_labels)
+	basic_acc
+
+	import graphviz
+	dot_data = tree.export_graphviz(clf, out_file=None,
+									feature_names=df_train_class.columns,
+									class_names=["1", "0"],
+									filled=True,
+									rounded=True,
+									)
+	graph = graphviz.Source(dot_data)
+	graph.render("strom_" + strategy)
+
+	print("Metriky klasifikacie pomocou rozhodovacieho stromu na datach nahradenych strategiou " + strategy + ":\n\n")
+	print(classification_report(valid_labels, predicted_labels, target_names=["0", "1"]))
