@@ -617,5 +617,4 @@ def create_stromcek(strat_store, strategy):
 	graph = graphviz.Source(dot_data)
 	graph.render("strom_" + strategy)
 
-	print("Metriky klasifikacie pomocou rozhodovacieho stromu na datach nahradenych strategiou " + strategy + ":\n\n")
-	print(classification_report(valid_labels, predicted_labels, target_names=["0", "1"]))
+	strat_store["report"] = classification_report(valid_labels, predicted_labels, target_names=["0", "1"])
